@@ -35,6 +35,14 @@ Command: `/ip 8.8.4.4`
 
 The bot checks the IP address and reports its exposed ports and risk level.
 
+## Project Screenshots
+
+### 1. n8n Workflow
+![CyberScope Workflow](screenshots/workflow.png)
+
+### 2. Telegram Bot Results
+![Telegram Bot Results](screenshots/telegram-results.png)
+
 ## Project Tag
 
 NGP-047
