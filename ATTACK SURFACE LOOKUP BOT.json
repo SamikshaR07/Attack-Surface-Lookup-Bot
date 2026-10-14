@@ -1,0 +1,409 @@
+{
+  "name": "NGP-047 | Attack Surface Lookup Bot (InternetDB)",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "963374f9-e199-4fb7-9086-a2273f258b84",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const m = $json.message || $json.edited_message || {};\nconst text = (m.text || '').trim();\nconst parts = text.split(/\\s+/);\nconst cmd = (parts[0] || '').split('@')[0].toLowerCase();\nconst ip = parts[1] || '';\nconst oct = '(25[0-5]|2[0-4]\\\\d|1\\\\d\\\\d|[1-9]?\\\\d)';\nconst ipv4 = new RegExp('^' + oct + '(\\\\.' + oct + '){3}$');\nreturn [{ json: {\n  chat_id: m.chat && m.chat.id,\n  from_user: (m.from && (m.from.username || m.from.first_name)) || null,\n  cmd, ip,\n  valid: cmd === '/ip' && ipv4.test(ip),\n  user_text: text\n} }];"
+      },
+      "id": "f6141486-fe70-4f18-bf40-eac007072f41",
+      "name": "Parse command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "v1",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b58aa150-2ea3-4b7a-a16e-bfec2effc7af",
+      "name": "Valid /ip command?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        448,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://internetdb.shodan.io/{{ $json.ip }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "c19e7b5c-3191-467e-9c7a-391714263d16",
+      "name": "Shodan InternetDB lookup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        672,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "s1",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 200,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "534807c0-5fbe-4c4a-90f9-88b53c5e8706",
+      "name": "HTTP 200?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// S5 BEFORE: raw, un-minimised item (full IP, chat id, Telegram user, full hostnames)\nconst p = $('Parse command').first().json;\nconst b = $json.body || {};\nconst WATCH = [110, 5432, 5900];           // NGP-047 personal port watch-list\nconst ports = (b.ports || []).map(Number).sort((x, y) => x - y);\nconst hits = ports.filter(x => WATCH.includes(x));\nconst vulns = b.vulns || [];\nconst severity = hits.length ? 'HIGH' : (vulns.length ? 'MEDIUM' : 'LOW');\nconst summary = `${p.ip}: ${ports.length} open port(s) [${ports.join(', ') || 'none'}], ${vulns.length} CVE(s)` +\n  (hits.length ? `, WATCH-LIST HIT on ${hits.join(',')}` : ', no watch-list ports');\nreturn [{ json: {\n  chat_id: p.chat_id,\n  from_user: p.from_user,\n  ip: p.ip,\n  hostnames: b.hostnames || [],\n  ports, cpes: b.cpes || [], vulns, tags: b.tags || [],\n  watchlist_hits: hits,\n  severity, summary\n} }];"
+      },
+      "id": "7ca17e61-84a1-4725-9291-822e4a1600ad",
+      "name": "S5 BEFORE raw",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// S5 AFTER: only what the LLM needs. No chat id, no Telegram user, last octet masked,\n// hostnames reduced to their domain with any embedded IP-like octets masked.\nconst b = $json;\nconst maskIp = s => String(s).replace(/\\b(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\.\\d{1,3}\\b/g, '$1.x');\nconst maskHost = h => {\n  const last2 = String(h).split('.').slice(-2).join('.');\n  return maskIp(last2).replace(/\\d{1,3}[-.]\\d{1,3}[-.]\\d{1,3}[-.]\\d{1,3}/g, 'x-x-x-x');\n};\nconst after = {\n  target_ip_masked: maskIp(b.ip),\n  open_ports: b.ports,\n  known_cves: b.vulns,\n  software_cpes: b.cpes,\n  tags: b.tags,\n  hostname_domains: [...new Set(b.hostnames.map(maskHost))],\n  watchlist_ports: [110, 5432, 5900],\n  watchlist_hits: b.watchlist_hits,\n  severity: b.severity\n};\nreturn [{ json: { llm_input: JSON.stringify(after, null, 2), ...after } }];"
+      },
+      "id": "44271837-1efe-4f6e-8118-784d1ad5da7b",
+      "name": "S5 AFTER masked",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1328,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.llm_input }}",
+        "options": {
+          "systemMessage": "You are a defensive security assistant. You receive a JSON summary of an internet-facing host from Shodan InternetDB (last IP octet is masked). Reply in plain English, no markdown, max 150 words, in exactly this shape:\nAttack surface: 2-4 sentences on what the open ports, CVEs, software and hostnames mean to an attacker.\nTop 3 hardening steps:\n1. ...\n2. ...\n3. ...\nRules: use only the data given, never invent CVEs, services or versions. If watchlist_hits is not empty, start with one sentence saying those ports are on the owner's watch-list and are high risk. If there are no open ports, say so and still give 3 sensible general hardening steps. Each step must be one concrete, defensive action."
+        }
+      },
+      "id": "2c038a0b-9269-4240-a96c-51f4efe10d23",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        1552,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const EID = ($execution.id && !String($execution.id).startsWith('__')) ? $execution.id : 'manual';\nconst b = $('S5 BEFORE raw').first().json;\nconst esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }) + ' IST';\nconst ai = ($json.output || '').toString().trim();\nconst aiOk = ai.length > 0 && !$json.error;\nconst head = `🔴 NGP-047 | exec #${EID} | ${ist} | ${b.severity} | ${b.summary}`;\nconst body = aiOk ? ai :\n  `(AI explanation unavailable - LLM step failed. Raw facts from InternetDB follow.)\\nOpen ports: ${b.ports.join(', ') || 'none'}\\nCVEs: ${b.vulns.length ? b.vulns.join(', ') : 'none'}`;\nreturn [{ json: { chat_id: b.chat_id, text: esc(head) + '\\n\\n' + esc(body) } }];"
+      },
+      "id": "58fde679-22f7-40af-97df-7147532bde46",
+      "name": "Compose alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const EID = ($execution.id && !String($execution.id).startsWith('__')) ? $execution.id : 'manual';\n// Handles: bad input, \"no data\" (404) and SOURCE DOWN (timeout / network / 5xx)\nconst p = $('Parse command').first().json;\nconst j = $json;\nconst esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }) + ' IST';\nlet verdict, summary;\nif (p.valid === false) {\n  verdict = 'BAD INPUT';\n  summary = 'Usage: /ip <IPv4 address>, e.g. /ip 8.8.4.4';\n} else if (j.statusCode === 404) {\n  verdict = 'INFO';\n  summary = `No InternetDB data for ${p.ip} (host not indexed / nothing exposed)`;\n} else {\n  verdict = 'SOURCE DOWN';\n  const why = j.statusCode ? 'HTTP ' + j.statusCode\n    : ((j.error && (j.error.message || j.error.description)) || j.message || 'timeout / network error');\n  summary = `Shodan InternetDB unreachable (${why}) - lookup for ${p.ip || 'n/a'} NOT completed, retry later`;\n}\nconst head = `🔴 NGP-047 | exec #${EID} | ${ist} | ${verdict} | ${summary}`;\nreturn [{ json: { chat_id: p.chat_id, text: esc(head) } }];"
+      },
+      "id": "3635ea3c-54aa-403b-a975-96a5d185dcac",
+      "name": "Build status message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "ae14f2c6-0915-45e8-b5e1-5bdf70b7a91e",
+      "name": "Send to Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2208,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        1552,
+        176
+      ],
+      "id": "46ad9e52-597b-43f6-8f4d-35b01c1146b6",
+      "name": "Google Gemini Chat Model"
+    },
+    {
+      "parameters": {
+        "content": "## NGP-047 Attack Surface Lookup Bot\n**F1:** Shodan HTTP node uses node-level error output (10 s timeout, 1 retry, neverError so 404/429/5xx are inspected). Timeouts, network errors and non-200 replies -> 'SOURCE DOWN' Telegram message. If the LLM fails, a fallback message with raw facts is still sent.\n\n**S5:** compare outputs of `S5 BEFORE raw` and `S5 AFTER masked`. The agent only receives `llm_input` from the AFTER node.\n\n**HIGH** is decided in code if any of [110, 5432, 5900] is open.",
+        "height": 300,
+        "width": 520
+      },
+      "id": "c3a1f0aa-61d2-4b53-8e0c-7a9d2b11e5f4",
+      "name": "Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        520
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse command": {
+      "main": [
+        [
+          {
+            "node": "Valid /ip command?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid /ip command?": {
+      "main": [
+        [
+          {
+            "node": "Shodan InternetDB lookup",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build status message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shodan InternetDB lookup": {
+      "main": [
+        [
+          {
+            "node": "HTTP 200?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build status message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP 200?": {
+      "main": [
+        [
+          {
+            "node": "S5 BEFORE raw",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build status message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "S5 BEFORE raw": {
+      "main": [
+        [
+          {
+            "node": "S5 AFTER masked",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "S5 AFTER masked": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Compose alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Compose alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose alert": {
+      "main": [
+        [
+          {
+            "node": "Send to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build status message": {
+      "main": [
+        [
+          {
+            "node": "Send to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timezone": "Asia/Kolkata"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "nodeGroups": [],
+  "tags": []
+}
